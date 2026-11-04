@@ -14,8 +14,15 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 describe('Redis (real server)', () => {
   let redis: Redis;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     redis = createRedis(url);
+    // The client has no offline queue, so wait until the connection is ready before any command.
+    if (redis.status !== 'ready') {
+      await new Promise<void>((resolve, reject) => {
+        redis.once('ready', () => resolve());
+        redis.once('end', () => reject(new Error('Redis connection ended before it was ready')));
+      });
+    }
   });
 
   beforeEach(async () => {

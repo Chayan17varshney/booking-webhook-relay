@@ -70,6 +70,7 @@ jobs:
   integration:
     name: Integration tests (real Postgres and Redis)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     services:
       postgres:
         image: postgres:16-alpine
