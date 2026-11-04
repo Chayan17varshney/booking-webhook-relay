@@ -1,6 +1,6 @@
 # Architecture decision records
 
-Write one short file per decision, named `NNNN-short-title.md`. Write them in your own words; they are the part of this repo that shows how you think.
+One short file per decision, named `NNNN-short-title.md`.
 
 ## Template
 
@@ -23,8 +23,8 @@ What else did we look at, and why not?
 What gets easier, what gets harder, what will we have to revisit?
 ```
 
-## Decisions to write as you build
-- 0001 HMAC signatures on webhooks (Block 2)
-- 0002 PostgreSQL for event storage (Block 3)
-- 0003 Redis for idempotency keys and rate limiting (Block 4)
-- 0004 Retry with exponential backoff and jitter (Block 4)
+## Decisions
+- [0001 HMAC signatures on webhooks](0001-hmac-signatures-on-webhooks.md)
+- [0002 PostgreSQL for event storage](0002-postgresql-for-event-storage.md)
+- [0003 Redis for idempotency keys and rate limiting](0003-redis-for-idempotency-and-rate-limiting.md)
+- [0004 Retry with exponential backoff and jitter](0004-retry-with-exponential-backoff-and-jitter.md)
