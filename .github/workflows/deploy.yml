@@ -1,0 +1,124 @@
+name: Deploy
+
+# Deploys to the single EC2 host once CI has passed on main (or when run by hand).
+# Prerequisites: see infra/README.md. Nothing here uses long-lived AWS keys: the job
+# exchanges GitHub's OIDC token for short-lived credentials of a role that only trusts
+# this repository's "production" environment.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # needed to request the OIDC token
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false # never interrupt a deploy that is half way through
+
+jobs:
+  deploy:
+    name: Build, deploy, smoke test
+    # Skipped (not failed) until the AWS variables exist, so a fresh fork or a repo that has not
+    # set up AWS yet does not show a red cross on every push.
+    if: >-
+      vars.AWS_ROLE_ARN != '' &&
+      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://${{ vars.PUBLIC_HOST }}
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - name: Check the environment variables are set
+        env:
+          ROLE: ${{ vars.AWS_ROLE_ARN }}
+          REPO: ${{ vars.ECR_REPOSITORY }}
+          INSTANCE: ${{ vars.INSTANCE_ID }}
+          HOST: ${{ vars.PUBLIC_HOST }}
+        run: |
+          for name in AWS_REGION ROLE REPO INSTANCE HOST; do
+            if [ -z "${!name}" ]; then
+              echo "::error::The '$name' variable is empty. Add the Terraform outputs as variables of the 'production' environment (see infra/README.md)."
+              exit 1
+            fi
+          done
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Work out the image name and whether it already exists
+        id: image
+        run: |
+          IMAGE="${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${SHA}"
+          echo "uri=$IMAGE" >> "$GITHUB_OUTPUT"
+          if aws ecr describe-images --repository-name "${{ vars.ECR_REPOSITORY }}" --image-ids imageTag="$SHA" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Image for $SHA is already in ECR (tags are immutable), so it will be reused."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.image.outputs.exists == 'false'
+
+      - name: Build and push the image (tagged with the commit SHA)
+        if: steps.image.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image.outputs.uri }}
+          platforms: linux/amd64
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy to the instance (SSM Run Command)
+        id: deploy
+        env:
+          IMAGE: ${{ steps.image.outputs.uri }}
+        run: |
+          {
+            echo 'set -euo pipefail'
+            # Wait for first-boot setup (Docker and Compose) if the instance was only just created.
+            echo 'for i in $(seq 1 60); do if command -v docker >/dev/null && docker compose version >/dev/null 2>&1; then break; fi; sleep 5; done'
+            echo 'mkdir -p /opt/relay'
+            for f in docker-compose.prod.yml Caddyfile deploy.sh; do
+              echo "echo '$(base64 -w0 "deploy/$f")' | base64 -d > /opt/relay/$f"
+            done
+            echo "bash /opt/relay/deploy.sh '$IMAGE'"
+          } > /tmp/deploy-command.sh
+          bash deploy/ssm-run.sh "${{ vars.INSTANCE_ID }}" "$AWS_REGION" /tmp/deploy-command.sh
+
+      - name: Smoke test the public URL
+        id: smoke
+        run: |
+          WEBHOOK_SECRET="$(aws ssm get-parameter --region "$AWS_REGION" --name /booking-webhook-relay/WEBHOOK_SECRET --with-decryption --query Parameter.Value --output text)"
+          ADMIN_API_KEY="$(aws ssm get-parameter --region "$AWS_REGION" --name /booking-webhook-relay/ADMIN_API_KEY --with-decryption --query Parameter.Value --output text)"
+          echo "::add-mask::$WEBHOOK_SECRET"
+          echo "::add-mask::$ADMIN_API_KEY"
+          export WEBHOOK_SECRET ADMIN_API_KEY
+          BASE_URL="https://${{ vars.PUBLIC_HOST }}" bash scripts/smoke.sh
+
+      - name: Roll back if the smoke test failed
+        if: failure() && steps.deploy.outcome == 'success' && steps.smoke.outcome == 'failure'
+        run: |
+          echo 'bash /opt/relay/deploy.sh --rollback' > /tmp/rollback-command.sh
+          bash deploy/ssm-run.sh "${{ vars.INSTANCE_ID }}" "$AWS_REGION" /tmp/rollback-command.sh

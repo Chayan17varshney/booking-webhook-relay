@@ -1,0 +1,63 @@
+# Local development stack. The passwords below are throwaway defaults for local use only.
+services:
+  api:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-dev-only-secret-change-me}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-dev-only-admin-key-change-me}
+      DEFAULT_PHONE_COUNTRY: ${DEFAULT_PHONE_COUNTRY:-IN}
+      DATABASE_URL: postgres://relay:${POSTGRES_PASSWORD:-relay_dev_password}@postgres:5432/relay
+      REDIS_URL: redis://redis:6379
+      CRM_BASE_URL: http://mock-crm:4000
+      CRM_API_KEY: ${CRM_API_KEY:-dev-crm-key}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock-crm:
+        condition: service_started
+
+  # Stand-in CRM for local development. FAIL_RATE=0.5 makes half the requests fail with 503
+  # so you can watch retries and the failed/replay flow.
+  mock-crm:
+    build: .
+    command: ["node", "dist/mockCrm/server.js"]
+    environment:
+      PORT: 4000
+      CRM_API_KEY: ${CRM_API_KEY:-dev-crm-key}
+      FAIL_RATE: ${MOCK_CRM_FAIL_RATE:-0}
+    ports:
+      - "4000:4000"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: relay
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-relay_dev_password}
+      POSTGRES_DB: relay
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relay -d relay"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

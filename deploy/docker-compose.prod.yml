@@ -1,0 +1,100 @@
+# Production stack for the single EC2 host. deploy.sh writes ./.env from SSM Parameter Store
+# (WEBHOOK_SECRET, ADMIN_API_KEY, POSTGRES_PASSWORD, CRM_API_KEY, PUBLIC_HOST, AWS_REGION,
+# LOG_GROUP) plus API_IMAGE; Compose reads that file automatically.
+#
+# Only Caddy publishes ports. Postgres, Redis, the API and the mock CRM are reachable only
+# from inside the compose network.
+
+x-logging: &cloudwatch
+  driver: awslogs
+  options:
+    awslogs-region: ${AWS_REGION:?AWS_REGION is not set}
+    awslogs-group: ${LOG_GROUP:?LOG_GROUP is not set}
+    tag: "{{.Name}}"
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:?PUBLIC_HOST is not set}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data # certificates: keep them across redeploys to avoid re-issuing
+      - caddy_config:/config
+    depends_on:
+      - api
+    mem_limit: 128m
+    logging: *cloudwatch
+
+  api:
+    image: ${API_IMAGE:?API_IMAGE is not set}
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      TRUST_PROXY: 1 # one reverse proxy (Caddy) in front, so req.ip is the real client
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:?WEBHOOK_SECRET is not set}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:?ADMIN_API_KEY is not set}
+      DATABASE_URL: postgres://relay:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set}@postgres:5432/relay
+      REDIS_URL: redis://redis:6379
+      CRM_BASE_URL: http://mock-crm:4000
+      CRM_API_KEY: ${CRM_API_KEY:?CRM_API_KEY is not set}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock-crm:
+        condition: service_started
+    mem_limit: 512m
+    logging: *cloudwatch
+
+  # The "CRM" is a stand-in. Point CRM_BASE_URL at a real CRM to use this for real.
+  mock-crm:
+    image: ${API_IMAGE:?API_IMAGE is not set}
+    command: ["node", "dist/mockCrm/server.js"]
+    restart: unless-stopped
+    environment:
+      PORT: 4000
+      CRM_API_KEY: ${CRM_API_KEY:?CRM_API_KEY is not set}
+      FAIL_RATE: 0
+    mem_limit: 128m
+    logging: *cloudwatch
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: relay
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set}
+      POSTGRES_DB: relay
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relay -d relay"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    mem_limit: 512m
+    logging: *cloudwatch
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Idempotency keys and rate-limit counters are disposable (they all have TTLs), so no persistence.
+    command: ["redis-server", "--appendonly", "no", "--save", "", "--maxmemory", "128mb", "--maxmemory-policy", "volatile-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    mem_limit: 192m
+    logging: *cloudwatch
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

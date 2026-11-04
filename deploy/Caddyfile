@@ -1,0 +1,13 @@
+# Caddy obtains and renews a Let's Encrypt certificate for PUBLIC_HOST automatically.
+# This needs port 80 reachable from the internet and the name resolving to this server.
+{$PUBLIC_HOST} {
+	encode zstd gzip
+
+	header {
+		# One day, so a mistake is not cached for a year. Raise it once everything is stable.
+		Strict-Transport-Security "max-age=86400"
+		-Server
+	}
+
+	reverse_proxy api:3000
+}
